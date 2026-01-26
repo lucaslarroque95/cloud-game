@@ -1,0 +1,369 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template para API Gateway WebSocket con Lambda y DynamoDB para el juego en la nube'
+
+Parameters:
+  S3BucketLambdaCode:
+    Type: String
+    Description: 'Nombre del bucket S3 donde se almacenan los paquetes Lambda'
+    Default: ''
+  
+  S3KeyConnectLambda:
+    Type: String
+    Description: 'Clave S3 para el paquete Lambda de connect'
+    Default: 'lambdas/connect.zip'
+  
+  S3KeyDisconnectLambda:
+    Type: String
+    Description: 'Clave S3 para el paquete Lambda de disconnect'
+    Default: 'lambdas/disconnect.zip'
+  
+  S3KeyDefaultLambda:
+    Type: String
+    Description: 'Clave S3 para el paquete Lambda de default'
+    Default: 'lambdas/default.zip'
+
+Resources:
+  # ============================================
+  # DynamoDB Tables
+  # ============================================
+  
+  PlayersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Players
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      AttributeDefinitions:
+        - AttributeName: playerId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: N
+        - AttributeName: roomId
+          AttributeType: S
+        - AttributeName: connectionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: playerId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_Status
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 1
+            WriteCapacityUnits: 1
+        - IndexName: GSI_Room
+          KeySchema:
+            - AttributeName: roomId
+              KeyType: HASH
+            - AttributeName: connectionId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 1
+            WriteCapacityUnits: 1
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: ttl
+
+  GamesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Games
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      AttributeDefinitions:
+        - AttributeName: roomId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: roomId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: ttl
+
+  # ============================================
+  # IAM Roles para Lambda
+  # ============================================
+  
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt PlayersTable.Arn
+                  - !GetAtt GamesTable.Arn
+                  - !Sub '${PlayersTable.Arn}/index/*'
+                  - !Sub '${GamesTable.Arn}/index/*'
+        - PolicyName: APIGatewayWebSocketAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - execute-api:ManageConnections
+                Resource:
+                  - !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketAPI}/*/*'
+
+  # ============================================
+  # Lambda Functions
+  # ============================================
+  
+  ConnectLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloud-game-connect
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          
+          def lambda_handler(event, context):
+              request_context = event.get("requestContext", {})
+              
+              return {"statusCode": 200}
+      Timeout: 30
+      Environment:
+        Variables:
+          PLAYERS_TABLE_NAME: !Ref PlayersTable
+          GAMES_TABLE_NAME: !Ref GamesTable
+
+  DisconnectLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloud-game-disconnect
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          
+          def lambda_handler(event, context):
+              connection_id = event.get("requestContext",{}).get("connectionId")
+              # borrar de DynamoDB
+              return {
+                  'statusCode': 200
+              }
+      Timeout: 30
+      Environment:
+        Variables:
+          PLAYERS_TABLE_NAME: !Ref PlayersTable
+          GAMES_TABLE_NAME: !Ref GamesTable
+
+  DefaultLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloud-game-default
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !If
+          - HasS3Bucket
+          - !Ref S3BucketLambdaCode
+          - !Ref AWS::NoValue
+        S3Key: !If
+          - HasS3Bucket
+          - !Ref S3KeyDefaultLambda
+          - !Ref AWS::NoValue
+        ZipFile: !If
+          - HasS3Bucket
+          - !Ref AWS::NoValue
+          - |
+            # Placeholder - usar S3 para código completo
+            import json
+            def lambda_handler(event, context):
+                return {"statusCode": 200}
+      Timeout: 60
+      Environment:
+        Variables:
+          PLAYERS_TABLE_NAME: !Ref PlayersTable
+          GAMES_TABLE_NAME: !Ref GamesTable
+
+  # ============================================
+  # API Gateway WebSocket
+  # ============================================
+  
+  WebSocketAPI:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: cloud-game-websocket-api
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: '$request.body.action'
+      Description: 'API Gateway WebSocket para el juego en la nube'
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketAPI
+      StageName: production
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+
+  # ============================================
+  # WebSocket Routes
+  # ============================================
+  
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketAPI
+      RouteKey: $connect
+      Target: !Sub 'integrations/${ConnectIntegration}'
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketAPI
+      RouteKey: $disconnect
+      Target: !Sub 'integrations/${DisconnectIntegration}'
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketAPI
+      RouteKey: $default
+      Target: !Sub 'integrations/${DefaultIntegration}'
+
+  # ============================================
+  # WebSocket Integrations
+  # ============================================
+  
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConnectLambdaFunction.Arn}/invocations'
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DisconnectLambdaFunction.Arn}/invocations'
+
+  DefaultIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DefaultLambdaFunction.Arn}/invocations'
+
+  # ============================================
+  # Permisos Lambda para API Gateway
+  # ============================================
+  
+  ConnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ConnectLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketAPI}/*/$connect'
+
+  DisconnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DisconnectLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketAPI}/*/$disconnect'
+
+  DefaultLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DefaultLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketAPI}/*/$default'
+
+Conditions:
+  HasS3Bucket: !Not [!Equals [!Ref S3BucketLambdaCode, '']]
+
+Outputs:
+  WebSocketApiId:
+    Description: 'ID del API Gateway WebSocket'
+    Value: !Ref WebSocketAPI
+    Export:
+      Name: !Sub '${AWS::StackName}-WebSocketApiId'
+
+  WebSocketApiEndpoint:
+    Description: 'Endpoint del API Gateway WebSocket'
+    Value: !Sub 'wss://${WebSocketAPI}.execute-api.${AWS::Region}.amazonaws.com/${WebSocketStage}'
+    Export:
+      Name: !Sub '${AWS::StackName}-WebSocketApiEndpoint'
+
+  WebSocketApiUrl:
+    Description: 'URL completa del API Gateway WebSocket'
+    Value: !Sub 'https://${WebSocketAPI}.execute-api.${AWS::Region}.amazonaws.com/${WebSocketStage}'
+    Export:
+      Name: !Sub '${AWS::StackName}-WebSocketApiUrl'
+
+  PlayersTableName:
+    Description: 'Nombre de la tabla DynamoDB Players'
+    Value: !Ref PlayersTable
+    Export:
+      Name: !Sub '${AWS::StackName}-PlayersTable'
+
+  GamesTableName:
+    Description: 'Nombre de la tabla DynamoDB Games'
+    Value: !Ref GamesTable
+    Export:
+      Name: !Sub '${AWS::StackName}-GamesTable'
+
+  ConnectLambdaArn:
+    Description: 'ARN de la función Lambda Connect'
+    Value: !GetAtt ConnectLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ConnectLambdaArn'
+
+  DisconnectLambdaArn:
+    Description: 'ARN de la función Lambda Disconnect'
+    Value: !GetAtt DisconnectLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DisconnectLambdaArn'
+
+  DefaultLambdaArn:
+    Description: 'ARN de la función Lambda Default'
+    Value: !GetAtt DefaultLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DefaultLambdaArn'
