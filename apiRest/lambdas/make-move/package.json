@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@game/domain": ["../../packages/domain/src"]
+    },
+    "outDir": "dist",
+    "moduleResolution": "node",
+    "target": "ES2020",
+    "module": "CommonJS"
+  }
+}

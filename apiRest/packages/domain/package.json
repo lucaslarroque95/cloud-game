@@ -1,0 +1,11 @@
+{
+  "name": "@game/domain",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.500.0",
+    "@aws-sdk/lib-dynamodb": "^3.500.0",
+    "@types/node": "^18.19.0",
+    "typescript": "^5.3.3"
+  }
+}

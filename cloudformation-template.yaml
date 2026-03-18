@@ -22,6 +22,16 @@ Parameters:
     Description: 'Clave S3 para el paquete Lambda de default'
     Default: 'lambdas/default.zip'
 
+  S3KeyDomainLayer:
+    Type: String
+    Description: 'Clave S3 para el Lambda Layer del domain'
+    Default: 'layers/domain-layer.zip'
+
+  S3KeyCreateGameLambda:
+    Type: String
+    Description: 'Clave S3 para el paquete Lambda de create-game'
+    Default: 'lambdas/create-game.zip'
+
 Resources:
   # ============================================
   # DynamoDB Tables
@@ -85,10 +95,10 @@ Resources:
         ReadCapacityUnits: 1
         WriteCapacityUnits: 1
       AttributeDefinitions:
-        - AttributeName: roomId
+        - AttributeName: gameId
           AttributeType: S
       KeySchema:
-        - AttributeName: roomId
+        - AttributeName: gameId
           KeyType: HASH
       TimeToLiveSpecification:
         Enabled: true
@@ -137,9 +147,45 @@ Resources:
                   - execute-api:ManageConnections
                 Resource:
                   - !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketAPI}/*/*'
-
+  
   # ============================================
-  # Lambda Functions
+  # Lambda Layer
+  # ============================================
+  
+  GameDomainLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: game-domain
+      Description: 'Domain compartido para lambdas del juego'
+      CompatibleRuntimes:
+        - nodejs18.x
+        - nodejs20.x
+      Content:
+        S3Bucket: !Ref S3BucketLambdaCode
+        S3Key: !Ref S3KeyDomainLayer
+  
+  # ============================================
+  # RestApi Lambda Functions
+  # ============================================
+  
+  CreateGameLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloud-game-create
+      Runtime: nodejs18.x
+      Handler: handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref S3BucketLambdaCode
+        S3Key: !Ref S3KeyCreateGameLambda
+      Layers:
+        - !Ref GameDomainLayer
+      Environment:
+        Variables:
+          GAMES_TABLE_NAME: !Ref GamesTable
+  
+  # ============================================
+  # WebSocket Lambda Functions
   # ============================================
   
   ConnectLambdaFunction:
@@ -150,13 +196,24 @@ Resources:
       Handler: lambda_function.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Code:
-        ZipFile: |
-          import json
-          
-          def lambda_handler(event, context):
-              request_context = event.get("requestContext", {})
-              
-              return {"statusCode": 200}
+        S3Bucket: !If
+          - HasS3Bucket
+          - !Ref S3BucketLambdaCode
+          - !Ref AWS::NoValue
+        S3Key: !If
+          - HasS3Bucket
+          - !Ref S3KeyConnectLambda
+          - !Ref AWS::NoValue
+        ZipFile: !If
+          - HasS3Bucket
+          - !Ref AWS::NoValue
+          - |
+            import json
+            
+            def lambda_handler(event, context):
+                request_context = event.get("requestContext", {})
+                
+                return {"statusCode": 200}
       Timeout: 30
       Environment:
         Variables:
@@ -171,15 +228,26 @@ Resources:
       Handler: lambda_function.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Code:
-        ZipFile: |
-          import json
-          
-          def lambda_handler(event, context):
-              connection_id = event.get("requestContext",{}).get("connectionId")
-              # borrar de DynamoDB
-              return {
-                  'statusCode': 200
-              }
+        S3Bucket: !If
+          - HasS3Bucket
+          - !Ref S3BucketLambdaCode
+          - !Ref AWS::NoValue
+        S3Key: !If
+          - HasS3Bucket
+          - !Ref S3KeyDisconnectLambda
+          - !Ref AWS::NoValue
+        ZipFile: !If
+          - HasS3Bucket
+          - !Ref AWS::NoValue
+          - |
+            import json
+            
+            def lambda_handler(event, context):
+                connection_id = event.get("requestContext",{}).get("connectionId")
+                # borrar de DynamoDB
+                return {
+                    'statusCode': 200
+                }
       Timeout: 30
       Environment:
         Variables:
@@ -215,6 +283,62 @@ Resources:
         Variables:
           PLAYERS_TABLE_NAME: !Ref PlayersTable
           GAMES_TABLE_NAME: !Ref GamesTable
+
+  # ============================================
+  # API Gateway RestApi
+  # ============================================
+
+  GameRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: cloud-game-rest-api
+      Description: REST API para el juego
+
+  # ============================================
+  # RestApi Resources
+  # ============================================
+
+  GameResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref GameRestApi
+      ParentId: !GetAtt GameRestApi.RootResourceId
+      PathPart: game
+  
+  CreateGameResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref GameRestApi
+      ParentId: !Ref GameResource
+      PathPart: create
+
+  # ============================================
+  # RestApi Method
+  # ============================================
+
+  CreateGamePostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref GameRestApi
+      ResourceId: !Ref CreateGameResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CreateGameLambdaFunction.Arn}/invocations
+
+  # ============================================
+  # Permisos Lambda para RestApi Gateway
+  # ============================================
+
+  CreateGameLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CreateGameLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${GameRestApi}/*/POST/game/create
 
   # ============================================
   # API Gateway WebSocket
@@ -289,7 +413,7 @@ Resources:
       IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DefaultLambdaFunction.Arn}/invocations'
 
   # ============================================
-  # Permisos Lambda para API Gateway
+  # Permisos Lambda para WebSocket Gateway
   # ============================================
   
   ConnectLambdaPermission:
@@ -315,6 +439,19 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketAPI}/*/$default'
+
+  # ============================================
+  # RestApi Gateway deployment
+  # ============================================
+
+  GameRestApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - CreateGamePostMethod
+    Properties:
+      RestApiId: !Ref GameRestApi
+      StageName: production
+
 
 Conditions:
   HasS3Bucket: !Not [!Equals [!Ref S3BucketLambdaCode, '']]

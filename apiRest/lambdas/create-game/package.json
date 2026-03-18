@@ -1,0 +1,14 @@
+{
+  "name": "create-game",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@game/domain": "file:../../packages/domain",
+    "@types/node": "^18.19.0",
+    "typescript": "^5.3.3"
+  }
+}
